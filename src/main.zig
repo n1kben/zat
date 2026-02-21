@@ -5,7 +5,7 @@ pub const encoding = @import("encoding.zig");
 pub const page = @import("page.zig");
 pub const meta = @import("meta.zig");
 pub const file = @import("file.zig");
-// const btree = @import("btree.zig");
+pub const btree = @import("btree.zig");
 // const index = @import("index.zig");
 // const tx = @import("tx.zig");
 // const schema = @import("schema.zig");
@@ -17,4 +17,5 @@ test {
     _ = page;
     _ = meta;
     _ = file;
+    _ = btree;
 }
