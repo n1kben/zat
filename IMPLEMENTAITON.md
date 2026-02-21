@@ -940,11 +940,10 @@ enter the available pool.
 
 ### Legend
 - 🧪 = has specific tests listed in Section 10
-- ⏱️ = estimated effort (person-days)
 
 ---
 
-### Step 0: Project Scaffolding ⏱️ 1 day
+### Step 0: Project Scaffolding
 
 **What:** Set up Zig project structure, build system, test harness.
 
@@ -983,7 +982,7 @@ zatdb/
 
 ---
 
-### Step 1: Value Encoding 🧪 ⏱️ 2 days
+### Step 1: Value Encoding 🧪
 
 **Files:** `src/encoding.zig`
 
@@ -1000,7 +999,7 @@ Implement:
 
 ---
 
-### Step 2: Page Primitives 🧪 ⏱️ 2 days
+### Step 2: Page Primitives 🧪
 
 **Files:** `src/page.zig`
 
@@ -1028,7 +1027,7 @@ const Page = struct {
 
 ---
 
-### Step 3: File Manager & mmap 🧪 ⏱️ 3 days
+### Step 3: File Manager & mmap 🧪
 
 **Files:** `src/file.zig`, `src/meta.zig`
 
@@ -1064,7 +1063,7 @@ const FileManager = struct {
 
 ---
 
-### Step 4: B+ Tree (Read Path) 🧪 ⏱️ 3 days
+### Step 4: B+ Tree (Read Path) 🧪
 
 **Files:** `src/btree.zig`
 
@@ -1102,7 +1101,7 @@ const BPlusTree = struct {
 
 ---
 
-### Step 5: B+ Tree (Write Path — COW) 🧪 ⏱️ 5 days
+### Step 5: B+ Tree (Write Path — COW) 🧪
 
 **Files:** `src/btree.zig` (extend)
 
@@ -1141,7 +1140,7 @@ pub fn insert(self: *BPlusTree, key: []const u8, value: []const u8) !u64 {
 
 ---
 
-### Step 6: Free Page Tracking 🧪 ⏱️ 2 days
+### Step 6: Free Page Tracking 🧪
 
 **Files:** `src/btree.zig` (extend), `src/file.zig` (extend)
 
@@ -1155,7 +1154,7 @@ Implement:
 
 ---
 
-### Step 7: Schema & Bootstrap 🧪 ⏱️ 2 days
+### Step 7: Schema & Bootstrap 🧪
 
 **Files:** `src/schema.zig`
 
@@ -1169,7 +1168,7 @@ Implement:
 
 ---
 
-### Step 8: Index Manager 🧪 ⏱️ 3 days
+### Step 8: Index Manager 🧪
 
 **Files:** `src/index.zig`
 
@@ -1203,7 +1202,7 @@ const IndexManager = struct {
 
 ---
 
-### Step 9: Transaction Processor 🧪 ⏱️ 4 days
+### Step 9: Transaction Processor 🧪
 
 **Files:** `src/tx.zig`
 
@@ -1265,7 +1264,7 @@ const TxProcessor = struct {
 
 ---
 
-### Step 10: Datalog Parser 🧪 ⏱️ 3 days
+### Step 10: Datalog Parser 🧪
 
 **Files:** `src/query/parser.zig`
 
@@ -1286,7 +1285,7 @@ Phase 4: Add (or ...), (not ...), (not-join ...)
 
 ---
 
-### Step 11: Basic Query Executor 🧪 ⏱️ 4 days
+### Step 11: Basic Query Executor 🧪
 
 **Files:** `src/query/executor.zig`, `src/query/planner.zig`
 
@@ -1348,7 +1347,7 @@ fn executePattern(
 
 ---
 
-### Step 12: Time Travel 🧪 ⏱️ 3 days
+### Step 12: Time Travel 🧪
 
 **Files:** `src/query/executor.zig` (extend), `src/index.zig` (extend)
 
@@ -1376,7 +1375,7 @@ const FilteredDb = struct {
 
 ---
 
-### Step 13: Concurrent Readers 🧪 ⏱️ 3 days
+### Step 13: Concurrent Readers 🧪
 
 **Files:** `src/main.zig` (extend for reader slots), `src/file.zig` (extend)
 
@@ -1391,7 +1390,7 @@ Implement:
 
 ---
 
-### Step 14: Query Optimizer 🧪 ⏱️ 3 days
+### Step 14: Query Optimizer 🧪
 
 **Files:** `src/query/planner.zig` (extend)
 
@@ -1405,7 +1404,7 @@ Implement cost-based clause reordering:
 
 ---
 
-### Step 15: Leapfrog TrieJoin ⏱️ 4 days
+### Step 15: Leapfrog TrieJoin
 
 **Files:** `src/query/leapfrog.zig`
 
@@ -1419,7 +1418,7 @@ Implement for 3+ clause queries with cyclic variable sharing:
 
 ---
 
-### Step 16: Pull API ⏱️ 2 days
+### Step 16: Pull API
 
 **Files:** `src/query/pull.zig`
 
@@ -1430,7 +1429,7 @@ EAV index traversal with pattern-based attribute selection.
 
 ---
 
-### Step 17: C API ⏱️ 3 days
+### Step 17: C API
 
 **Files:** `src/c_api.zig`
 
@@ -1445,7 +1444,7 @@ Export stable C ABI:
 
 ---
 
-### Step 18: Compression (Page-Level) ⏱️ 3 days
+### Step 18: Compression (Page-Level)
 
 **Files:** `src/page.zig` (extend), `src/encoding.zig` (extend)
 
@@ -1459,7 +1458,7 @@ Implement within-page compression:
 
 ---
 
-### Step 19: Bloom Filters ⏱️ 2 days
+### Step 19: Bloom Filters
 
 **Files:** `src/bloom.zig`
 
@@ -1473,7 +1472,7 @@ Per-subtree bloom filters on leading key components:
 
 ---
 
-### Step 20: Benchmarks & Hardening ⏱️ 5 days
+### Step 20: Benchmarks & Hardening
 
 **Files:** `tools/zat-bench.zig`, fuzz targets
 
@@ -1871,37 +1870,7 @@ test "C API error handling"
 
 ---
 
-## Appendix A: Estimated Timeline
-
-| Step | Description                  | Days | Cumulative | Milestone                      |
-|------|------------------------------|------|------------|--------------------------------|
-| 0    | Project scaffolding          | 1    | 1          |                                |
-| 1    | Value encoding               | 2    | 3          |                                |
-| 2    | Page primitives              | 2    | 5          |                                |
-| 3    | File manager + mmap          | 3    | 8          |                                |
-| 4    | B+ tree read path            | 3    | 11         |                                |
-| 5    | B+ tree write (COW)          | 5    | 16         | Can store/retrieve key-values  |
-| 6    | Free page tracking           | 2    | 18         |                                |
-| 7    | Schema & bootstrap           | 2    | 20         |                                |
-| 8    | Index manager                | 3    | 23         |                                |
-| 9    | Transaction processor        | 4    | 27         | **🎉 Working database (MVP)**  |
-| 10   | Datalog parser               | 3    | 30         |                                |
-| 11   | Basic query executor         | 4    | 34         | **🎉 Can run Datalog queries** |
-| 12   | Time travel                  | 3    | 37         |                                |
-| 13   | Concurrent readers           | 3    | 40         |                                |
-| 14   | Query optimizer              | 3    | 43         |                                |
-| 15   | Leapfrog TrieJoin            | 4    | 47         | **🎉 Full query engine**       |
-| 16   | Pull API                     | 2    | 49         |                                |
-| 17   | C API                        | 3    | 52         | **🎉 Embeddable library**      |
-| 18   | Compression                  | 3    | 55         |                                |
-| 19   | Bloom filters                | 2    | 57         |                                |
-| 20   | Benchmarks & hardening       | 5    | 62         | **🎉 Production-ready v0.1**   |
-
-**Total: ~62 person-days (~3 months at sustainable pace)**
-
----
-
-## Appendix B: Key Data Structure Sizes
+## Appendix A: Key Data Structure Sizes
 
 For capacity planning and page layout math:
 

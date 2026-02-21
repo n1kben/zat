@@ -1,0 +1,11 @@
+.{
+    .name = .zatdb,
+    .version = "0.0.1",
+    .fingerprint = 0x70ff14e38b30799,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
