@@ -13,7 +13,7 @@ Status legend: `[ ]` pending, `[~]` in progress, `[x]` complete
 - Done when: `zig build test` passes with placeholder test
 
 ## Task 2: Value Encoding (Step 1)
-- Status: [ ] pending
+- Status: [x] complete
 - Deps: Task 1
 - Files: src/encoding.zig
 - Done when: roundtrip encode/decode tests pass for all value types (nil, bool, i64, f64, string, keyword, ref, instant, uuid, bytes); sortable encoding preserves order; cross-type tag ordering correct

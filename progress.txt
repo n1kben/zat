@@ -1,0 +1,24 @@
+## Task 2: Value Encoding (Step 1) — COMPLETE
+
+Files changed:
+- src/encoding.zig (new) — full value encoding/decoding module
+- src/main.zig — wired up encoding import and tests
+
+Implementation:
+- Value union type with all 10 types: nil, boolean, i64, f64, string, keyword, ref, instant, uuid, bytes
+- encode() / decode() with zero-copy decoding for variable-length types
+- encodeSortableI64: flip sign bit for unsigned bytewise comparison
+- encodeSortableF64: flip sign bit (positive) or invert all (negative)
+- compareEncoded() for bytewise comparison that preserves semantic order
+- encodedSize() and encodedLen() helpers
+- Value.order() and Value.eql() for in-memory comparison
+
+Tests (all passing):
+- Roundtrip encode/decode for all 10 value types including edge cases (empty string, max/min i64, NaN, -0.0, etc.)
+- Sortable i64 encoding preserves order (MIN < -1 < 0 < 1 < MAX)
+- Sortable f64 encoding preserves order (-inf < -1.0 < -0.0 < 0.0 < 1.0 < inf < NaN)
+- Encoded string ordering matches lexicographic order
+- Cross-type tag ordering (nil < bool < i64 < string)
+- Value.order matches compareEncoded for all tested pairs
+- encodedSize matches actual encoded length for all types
+- Sortable i64/f64 roundtrip tests

@@ -1,7 +1,7 @@
 // ZatDB — Datomic-style embedded database in Zig
 //
 // Module imports will be added as implementation progresses:
-// const encoding = @import("encoding.zig");
+pub const encoding = @import("encoding.zig");
 // const page = @import("page.zig");
 // const btree = @import("btree.zig");
 // const meta = @import("meta.zig");
@@ -12,6 +12,6 @@
 
 const std = @import("std");
 
-test "zatdb placeholder" {
-    try std.testing.expect(true);
+test {
+    _ = encoding;
 }
