@@ -1008,20 +1008,6 @@ Implement:
 - Leaf page: create, insert entry (sorted), lookup (binary search), split
 - Branch page: create, insert separator, lookup child, split
 - Overflow page: create chain, read chain
-- `PageBuffer` — in-memory page with dirty tracking
-
-```zig
-const Page = struct {
-    data: [*]align(page_size) u8,  // raw page bytes
-    dirty: bool,
-
-    pub fn header(self: *Page) *PageHeader { ... }
-    pub fn leafEntryCount(self: *Page) u16 { ... }
-    pub fn findInLeaf(self: *Page, key: []const u8, cmp: CmpFn) ?usize { ... }
-    pub fn insertInLeaf(self: *Page, idx: usize, key: []const u8, val: []const u8) !void { ... }
-    pub fn splitLeaf(self: *Page) !SplitResult { ... }
-};
-```
 
 **Tests:** See 10.2
 
@@ -1032,6 +1018,7 @@ const Page = struct {
 **Files:** `src/file.zig`, `src/meta.zig`
 
 Implement:
+- `PageBuffer` — in-memory page wrapper with dirty tracking (deferred from Step 2, needs file backing)
 - Open/create `.zat` file
 - Write meta page 0 on creation (bootstrap empty database)
 - mmap the file for reading

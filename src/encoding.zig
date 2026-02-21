@@ -241,19 +241,27 @@ fn decodeVarLen(data: []const u8) []const u8 {
     return data[5..][0..len];
 }
 
-fn writeU64(buf: *[8]u8, val: u64) void {
+pub fn writeU16(buf: *[2]u8, val: u16) void {
+    buf.* = @bitCast(@as(u16, @byteSwap(val)));
+}
+
+pub fn readU16(buf: *const [2]u8) u16 {
+    return @byteSwap(@as(u16, @bitCast(buf.*)));
+}
+
+pub fn writeU64(buf: *[8]u8, val: u64) void {
     buf.* = @bitCast(@as(u64, @byteSwap(val)));
 }
 
-fn readU64(buf: *const [8]u8) u64 {
+pub fn readU64(buf: *const [8]u8) u64 {
     return @byteSwap(@as(u64, @bitCast(buf.*)));
 }
 
-fn writeU32(buf: *[4]u8, val: u32) void {
+pub fn writeU32(buf: *[4]u8, val: u32) void {
     buf.* = @bitCast(@as(u32, @byteSwap(val)));
 }
 
-fn readU32(buf: *const [4]u8) u32 {
+pub fn readU32(buf: *const [4]u8) u32 {
     return @byteSwap(@as(u32, @bitCast(buf.*)));
 }
 
