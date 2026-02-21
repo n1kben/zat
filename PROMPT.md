@@ -1,8 +1,8 @@
-Read CLAUDE.md, TASKS.md, IMPLEMENTAITON.md, and progress.txt.
+Read CLAUDE.md, TASKS.md, IMPLEMENTATION.md, and progress.txt.
 Then:
 1. Review progress.txt to understand what's been done.
 2. Pick the next unfinished task from TASKS.md (respect dependencies).
-3. Read the relevant section of IMPLEMENTAITON.md for detailed specs.
+3. Read the relevant section of IMPLEMENTATION.md for detailed specs.
 4. Implement the task. Write clean, idiomatic Zig code.
 5. Run 'zig build' — fix any compilation errors.
 6. Run 'zig build test' — fix any test failures.

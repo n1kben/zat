@@ -47,7 +47,7 @@ src/
 1. Read TASKS.md to see all tasks and their status.
 2. Read progress.txt to understand what's been done in previous sessions.
 3. Pick the next unfinished task (respect dependencies — don't skip ahead).
-4. Read the relevant section of IMPLEMENTAITON.md for detailed specs.
+4. Read the relevant section of IMPLEMENTATION.md for detailed specs.
 5. Implement the task. Write clean, idiomatic Zig code.
 6. Run `zig build` — fix any compilation errors.
 7. Run `zig build test` — fix any test failures.
@@ -71,6 +71,6 @@ Conventional commits. One feature per commit. Examples:
 
 ## Key References
 
-- `IMPLEMENTAITON.md` — Full technical design (20 steps, test strategy, data layouts)
+- `IMPLEMENTATION.md` — Full technical design (20 steps, test strategy, data layouts)
 - `TASKS.md` — Ordered task list with status and acceptance criteria
 - `progress.txt` — Cross-session memory of what's been done
