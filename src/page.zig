@@ -344,6 +344,23 @@ fn repackLeaf(buf: []u8, index_id: IndexId, start: u16, end: u16) void {
     }
 }
 
+/// Remove entry at slot `idx` from a leaf page. Shifts slot offsets down,
+/// decrements num_entries. Does NOT reclaim data space (dead space acceptable for COW).
+pub fn leafDeleteEntry(buf: []u8, idx: u16) void {
+    var header = readHeader(buf);
+    std.debug.assert(idx < header.num_entries);
+
+    // Shift slots down
+    var i: u16 = idx;
+    while (i < header.num_entries - 1) : (i += 1) {
+        const next_off = getSlotOffset(buf, LEAF_HEADER_SIZE, i + 1);
+        setSlotOffset(buf, LEAF_HEADER_SIZE, i, next_off);
+    }
+
+    header.num_entries -= 1;
+    writeHeader(buf, header);
+}
+
 // ============================================================================
 // Branch page operations
 // ============================================================================
@@ -422,6 +439,12 @@ pub fn branchGetKey(buf: []const u8, idx: u16) []const u8 {
 pub fn branchGetChild(buf: []const u8, idx: u16) u64 {
     const offset = getSlotOffset(buf, BRANCH_HEADER_SIZE, idx);
     return encoding.readU64(buf[offset..][0..8]);
+}
+
+/// Overwrite the child page ID at entry `idx` in a branch page.
+pub fn branchSetChild(buf: []u8, idx: u16, page_id: u64) void {
+    const offset = getSlotOffset(buf, BRANCH_HEADER_SIZE, idx);
+    encoding.writeU64(buf[offset..][0..8], page_id);
 }
 
 /// Return the number of entries in a branch page.
@@ -1043,6 +1066,88 @@ test "subtask 23: branch+leaf routing simulation" {
     const found_zzz = leafFindKey(&leaf_right, "zzz", testKeyCmp);
     try testing.expect(found_zzz != null);
     try testing.expectEqualStrings("v4", leafGetValue(&leaf_right, found_zzz.?));
+}
+
+// --- Phase K: Delete & SetChild Primitives (subtasks 25-29) ---
+
+test "subtask 25: leafDeleteEntry middle entry" {
+    var buf: [256]u8 = undefined;
+    initLeaf(&buf, .eav);
+    try leafInsertEntry(&buf, 0, "aaa", "v1");
+    try leafInsertEntry(&buf, 1, "bbb", "v2");
+    try leafInsertEntry(&buf, 2, "ccc", "v3");
+
+    leafDeleteEntry(&buf, 1); // delete "bbb"
+
+    try testing.expectEqual(@as(u16, 2), leafEntryCount(&buf));
+    try testing.expectEqualStrings("aaa", leafGetKey(&buf, 0));
+    try testing.expectEqualStrings("v1", leafGetValue(&buf, 0));
+    try testing.expectEqualStrings("ccc", leafGetKey(&buf, 1));
+    try testing.expectEqualStrings("v3", leafGetValue(&buf, 1));
+}
+
+test "subtask 26: leafDeleteEntry first and last" {
+    var buf: [256]u8 = undefined;
+    initLeaf(&buf, .eav);
+    try leafInsertEntry(&buf, 0, "aaa", "v1");
+    try leafInsertEntry(&buf, 1, "bbb", "v2");
+    try leafInsertEntry(&buf, 2, "ccc", "v3");
+
+    // Delete first
+    leafDeleteEntry(&buf, 0);
+    try testing.expectEqual(@as(u16, 2), leafEntryCount(&buf));
+    try testing.expectEqualStrings("bbb", leafGetKey(&buf, 0));
+    try testing.expectEqualStrings("ccc", leafGetKey(&buf, 1));
+
+    // Delete last
+    leafDeleteEntry(&buf, 1);
+    try testing.expectEqual(@as(u16, 1), leafEntryCount(&buf));
+    try testing.expectEqualStrings("bbb", leafGetKey(&buf, 0));
+}
+
+test "subtask 27: leafDeleteEntry single entry → empty" {
+    var buf: [256]u8 = undefined;
+    initLeaf(&buf, .eav);
+    try leafInsertEntry(&buf, 0, "aaa", "v1");
+    leafDeleteEntry(&buf, 0);
+    try testing.expectEqual(@as(u16, 0), leafEntryCount(&buf));
+}
+
+test "subtask 28: leafDeleteEntry then re-insert" {
+    var buf: [256]u8 = undefined;
+    initLeaf(&buf, .eav);
+    try leafInsertEntry(&buf, 0, "aaa", "v1");
+    try leafInsertEntry(&buf, 1, "bbb", "v2");
+    try leafInsertEntry(&buf, 2, "ccc", "v3");
+
+    leafDeleteEntry(&buf, 1); // delete "bbb"
+
+    // Re-insert at position 1 — data space from "bbb" is dead but new entry
+    // goes into remaining free space
+    try leafInsertEntry(&buf, 1, "bbb", "new_v2");
+    try testing.expectEqual(@as(u16, 3), leafEntryCount(&buf));
+    try testing.expectEqualStrings("aaa", leafGetKey(&buf, 0));
+    try testing.expectEqualStrings("bbb", leafGetKey(&buf, 1));
+    try testing.expectEqualStrings("new_v2", leafGetValue(&buf, 1));
+    try testing.expectEqualStrings("ccc", leafGetKey(&buf, 2));
+}
+
+test "subtask 29: branchSetChild" {
+    var buf: [256]u8 = undefined;
+    initBranch(&buf, .eav, 100);
+    try branchInsertEntry(&buf, 0, "ddd", 40);
+    try branchInsertEntry(&buf, 1, "hhh", 80);
+
+    // Overwrite child at index 0
+    branchSetChild(&buf, 0, 999);
+    try testing.expectEqual(@as(u64, 999), branchGetChild(&buf, 0));
+    // Other child untouched
+    try testing.expectEqual(@as(u64, 80), branchGetChild(&buf, 1));
+    // Right child untouched
+    try testing.expectEqual(@as(u64, 100), branchGetRightChild(&buf));
+    // Keys untouched
+    try testing.expectEqualStrings("ddd", branchGetKey(&buf, 0));
+    try testing.expectEqualStrings("hhh", branchGetKey(&buf, 1));
 }
 
 test "subtask 24: split then re-lookup all" {

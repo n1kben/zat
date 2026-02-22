@@ -20,10 +20,10 @@ pub const Entry = struct {
 
 pub const BPlusTree = struct {
     root: u64,
-    fm: *const file.FileManager,
+    fm: *file.FileManager,
     cmp: page.KeyCompareFn,
 
-    pub fn init(root_page: u64, fm: *const file.FileManager, cmp: page.KeyCompareFn) BPlusTree {
+    pub fn init(root_page: u64, fm: *file.FileManager, cmp: page.KeyCompareFn) BPlusTree {
         return .{ .root = root_page, .fm = fm, .cmp = cmp };
     }
 
@@ -104,6 +104,376 @@ pub const BPlusTree = struct {
         var it = self.seek(start);
         it.end_key = end_key;
         return it;
+    }
+
+    // ====================================================================
+    // Write operations (COW insert/delete)
+    // ====================================================================
+
+    const MAX_DEPTH: u8 = 16;
+
+    const PathEntry = struct {
+        page_id: u64,
+        child_idx: u16,
+        went_right: bool, // true if we followed the right_child pointer
+    };
+
+    const PropagateState = union(enum) {
+        cow: u64, // new page id replacing old child
+        split: struct {
+            sep_key: []const u8,
+            left_id: u64,
+            right_id: u64,
+        },
+    };
+
+    pub fn insert(self: *BPlusTree, key: []const u8, value: []const u8) !void {
+        const ps: usize = self.fm.page_size;
+
+        if (self.root == 0) {
+            // Empty tree: create a single leaf
+            const leaf_id = try self.fm.allocPage();
+            var buf: [65536]u8 = undefined;
+            const b = buf[0..ps];
+            page.initLeaf(b, .eav);
+            try page.leafInsertEntry(b, 0, key, value);
+            try self.fm.writePage(leaf_id, b);
+            try self.fm.remap();
+            self.root = leaf_id;
+            return;
+        }
+
+        // Descend with path tracking
+        var path: [MAX_DEPTH]PathEntry = undefined;
+        var depth: u8 = 0;
+        var cur_page_id = self.root;
+
+        while (true) {
+            const cur_buf = self.fm.readPage(cur_page_id);
+            const header = page.readHeader(cur_buf);
+            if (header.page_type == .leaf) break;
+
+            // Branch: find which child to follow
+            const count = page.branchEntryCount(cur_buf);
+            var child_idx: u16 = 0;
+            var went_right = true;
+            var child_id: u64 = page.branchGetRightChild(cur_buf);
+
+            for (0..count) |i| {
+                const sep_key = page.branchGetKey(cur_buf, @intCast(i));
+                switch (self.cmp(key, sep_key)) {
+                    .lt => {
+                        child_id = page.branchGetChild(cur_buf, @intCast(i));
+                        child_idx = @intCast(i);
+                        went_right = false;
+                        break;
+                    },
+                    .eq, .gt => {},
+                }
+            }
+
+            path[depth] = .{ .page_id = cur_page_id, .child_idx = child_idx, .went_right = went_right };
+            depth += 1;
+            cur_page_id = child_id;
+        }
+
+        // cur_page_id is the leaf
+        const old_leaf_id = cur_page_id;
+        var leaf_buf: [65536]u8 = undefined;
+        const lb = leaf_buf[0..ps];
+        const old_leaf = self.fm.readPage(old_leaf_id);
+        @memcpy(lb, old_leaf);
+
+        // If key exists, delete old entry first (update semantics)
+        if (page.leafFindKey(lb, key, self.cmp)) |existing_idx| {
+            page.leafDeleteEntry(lb, existing_idx);
+        }
+
+        // Find insertion point
+        const insert_idx = page.leafSearchPoint(lb, key, self.cmp);
+
+        // Try inserting
+        var state: PropagateState = undefined;
+
+        if (page.leafInsertEntry(lb, insert_idx, key, value)) |_| {
+            // Success — COW the leaf
+            const new_leaf_id = try self.fm.allocPage();
+            try self.fm.writePage(new_leaf_id, lb);
+            try self.fixLeafSiblings(old_leaf_id, lb, new_leaf_id, null);
+            state = .{ .cow = new_leaf_id };
+        } else |_| {
+            // PageFull — split
+            var right_buf: [65536]u8 = undefined;
+            const rb = right_buf[0..ps];
+            const split_result = page.leafSplit(lb, rb);
+
+            // Determine which half gets the new entry
+            const sep = split_result.separator_key;
+            // We need to copy sep before modifying pages
+            var sep_copy: [4096]u8 = undefined;
+            @memcpy(sep_copy[0..sep.len], sep);
+            const sep_saved = sep_copy[0..sep.len];
+
+            switch (self.cmp(key, sep_saved)) {
+                .lt => {
+                    const idx = page.leafSearchPoint(lb, key, self.cmp);
+                    try page.leafInsertEntry(lb, idx, key, value);
+                },
+                .eq, .gt => {
+                    const idx = page.leafSearchPoint(rb, key, self.cmp);
+                    try page.leafInsertEntry(rb, idx, key, value);
+                },
+            }
+
+            const new_left_id = try self.fm.allocPage();
+            const new_right_id = try self.fm.allocPage();
+
+            // Set sibling pointers within the split pair
+            page.setLeafNextPage(lb, new_right_id);
+            page.setLeafPrevPage(rb, new_left_id);
+
+            try self.fm.writePage(new_left_id, lb);
+            try self.fm.writePage(new_right_id, rb);
+
+            // Fix neighbors
+            try self.fixLeafSiblings(old_leaf_id, old_leaf, new_left_id, new_right_id);
+
+            state = .{ .split = .{ .sep_key = sep_saved, .left_id = new_left_id, .right_id = new_right_id } };
+        }
+
+        // Propagate upward
+        var level: u8 = depth;
+        while (level > 0) {
+            level -= 1;
+            const pe = path[level];
+            const branch_buf_mmap = self.fm.readPage(pe.page_id);
+            var branch_buf: [65536]u8 = undefined;
+            const bb = branch_buf[0..ps];
+            @memcpy(bb, branch_buf_mmap);
+
+            switch (state) {
+                .cow => |new_child_id| {
+                    if (pe.went_right) {
+                        page.branchSetRightChild(bb, new_child_id);
+                    } else {
+                        page.branchSetChild(bb, pe.child_idx, new_child_id);
+                    }
+                    const new_branch_id = try self.fm.allocPage();
+                    try self.fm.writePage(new_branch_id, bb);
+                    state = .{ .cow = new_branch_id };
+                },
+                .split => |s| {
+                    // Try inserting the separator into the branch
+                    var insert_at: u16 = undefined;
+                    if (pe.went_right) {
+                        // We followed right_child, so new separator goes at end
+                        insert_at = page.branchEntryCount(bb);
+                    } else {
+                        insert_at = pe.child_idx;
+                    }
+
+                    if (page.branchInsertEntry(bb, insert_at, s.sep_key, s.left_id)) |_| {
+                                    // Success — update the child pointer after the separator
+                        if (pe.went_right) {
+                            page.branchSetRightChild(bb, s.right_id);
+                        } else {
+                            // The entry at insert_at now has left_id as child.
+                            // The entry at insert_at+1 (or right_child) should point to right_id.
+                            if (insert_at + 1 < page.branchEntryCount(bb)) {
+                                page.branchSetChild(bb, insert_at + 1, s.right_id);
+                            } else {
+                                page.branchSetRightChild(bb, s.right_id);
+                            }
+                        }
+                        const new_branch_id = try self.fm.allocPage();
+                        try self.fm.writePage(new_branch_id, bb);
+                        state = .{ .cow = new_branch_id };
+                    } else |_| {
+                        // Branch is full — split it
+                        var right_branch_buf: [65536]u8 = undefined;
+                        const rbb = right_branch_buf[0..ps];
+
+                        const bsplit = page.branchSplit(bb, rbb);
+                        var promoted_key_copy: [4096]u8 = undefined;
+                        @memcpy(promoted_key_copy[0..bsplit.separator_key.len], bsplit.separator_key);
+                        const promoted_key = promoted_key_copy[0..bsplit.separator_key.len];
+
+                        // Now insert the child-split separator into the correct half
+                        switch (self.cmp(s.sep_key, promoted_key)) {
+                            .lt => {
+                                // Goes into left (bb)
+                                const idx = branchSearchPoint(bb, s.sep_key, self.cmp);
+                                page.branchInsertEntry(bb, idx, s.sep_key, s.left_id) catch unreachable;
+                                if (idx + 1 < page.branchEntryCount(bb)) {
+                                    page.branchSetChild(bb, idx + 1, s.right_id);
+                                } else {
+                                    page.branchSetRightChild(bb, s.right_id);
+                                }
+                            },
+                            .eq, .gt => {
+                                // Goes into right (rbb)
+                                const idx = branchSearchPoint(rbb, s.sep_key, self.cmp);
+                                page.branchInsertEntry(rbb, idx, s.sep_key, s.left_id) catch unreachable;
+                                if (idx + 1 < page.branchEntryCount(rbb)) {
+                                    page.branchSetChild(rbb, idx + 1, s.right_id);
+                                } else {
+                                    page.branchSetRightChild(rbb, s.right_id);
+                                }
+                            },
+                        }
+
+                        const new_left_branch = try self.fm.allocPage();
+                        const new_right_branch = try self.fm.allocPage();
+                        try self.fm.writePage(new_left_branch, bb);
+                        try self.fm.writePage(new_right_branch, rbb);
+                        state = .{ .split = .{ .sep_key = promoted_key, .left_id = new_left_branch, .right_id = new_right_branch } };
+                    }
+                },
+            }
+        }
+
+        // Set new root
+        switch (state) {
+            .cow => |new_root_id| {
+                self.root = new_root_id;
+            },
+            .split => |s| {
+                // Create new root branch
+                var root_buf: [65536]u8 = undefined;
+                const rootb = root_buf[0..ps];
+                page.initBranch(rootb, .eav, s.right_id);
+                try page.branchInsertEntry(rootb, 0, s.sep_key, s.left_id);
+                const new_root_id = try self.fm.allocPage();
+                try self.fm.writePage(new_root_id, rootb);
+                self.root = new_root_id;
+            },
+        }
+
+        try self.fm.remap();
+    }
+
+    pub fn delete(self: *BPlusTree, key: []const u8) !void {
+        if (self.root == 0) return;
+
+        const ps: usize = self.fm.page_size;
+
+        // Descend with path tracking
+        var path: [MAX_DEPTH]PathEntry = undefined;
+        var depth: u8 = 0;
+        var cur_page_id = self.root;
+
+        while (true) {
+            const cur_buf = self.fm.readPage(cur_page_id);
+            const header = page.readHeader(cur_buf);
+            if (header.page_type == .leaf) break;
+
+            const count = page.branchEntryCount(cur_buf);
+            var child_idx: u16 = 0;
+            var went_right = true;
+            var child_id: u64 = page.branchGetRightChild(cur_buf);
+
+            for (0..count) |i| {
+                const sep_key = page.branchGetKey(cur_buf, @intCast(i));
+                switch (self.cmp(key, sep_key)) {
+                    .lt => {
+                        child_id = page.branchGetChild(cur_buf, @intCast(i));
+                        child_idx = @intCast(i);
+                        went_right = false;
+                        break;
+                    },
+                    .eq, .gt => {},
+                }
+            }
+
+            path[depth] = .{ .page_id = cur_page_id, .child_idx = child_idx, .went_right = went_right };
+            depth += 1;
+            cur_page_id = child_id;
+        }
+
+        // At the leaf
+        const old_leaf_id = cur_page_id;
+        const old_leaf = self.fm.readPage(old_leaf_id);
+
+        // Check if key exists
+        const slot = page.leafFindKey(old_leaf, key, self.cmp) orelse return;
+
+        // COW copy + delete
+        var leaf_buf: [65536]u8 = undefined;
+        const lb = leaf_buf[0..ps];
+        @memcpy(lb, old_leaf);
+        page.leafDeleteEntry(lb, slot);
+
+        const new_leaf_id = try self.fm.allocPage();
+        try self.fm.writePage(new_leaf_id, lb);
+        try self.fixLeafSiblings(old_leaf_id, old_leaf, new_leaf_id, null);
+
+        // Propagate COW upward
+        var new_child_id = new_leaf_id;
+        var level: u8 = depth;
+        while (level > 0) {
+            level -= 1;
+            const pe = path[level];
+            const branch_buf_mmap = self.fm.readPage(pe.page_id);
+            var branch_buf: [65536]u8 = undefined;
+            const bb = branch_buf[0..ps];
+            @memcpy(bb, branch_buf_mmap);
+
+            if (pe.went_right) {
+                page.branchSetRightChild(bb, new_child_id);
+            } else {
+                page.branchSetChild(bb, pe.child_idx, new_child_id);
+            }
+            const new_branch_id = try self.fm.allocPage();
+            try self.fm.writePage(new_branch_id, bb);
+            new_child_id = new_branch_id;
+        }
+
+        self.root = new_child_id;
+        try self.fm.remap();
+    }
+
+    /// Fix sibling pointers for neighbors of a COW'd leaf.
+    /// For a simple COW (no split), new_right_id is null.
+    /// For a split, new_right_id is the right half's page id.
+    fn fixLeafSiblings(self: *BPlusTree, old_leaf_id: u64, old_leaf_data: []const u8, new_left_id: u64, new_right_id: ?u64) !void {
+        const ps: usize = self.fm.page_size;
+        const prev_id = page.getLeafPrevPage(old_leaf_data);
+        const next_id = page.getLeafNextPage(old_leaf_data);
+
+        if (new_right_id) |right_id| {
+            // Split case: old_prev.next → new_left_id, old_next.prev → right_id
+            if (prev_id != 0) {
+                var buf: [65536]u8 = undefined;
+                const b = buf[0..ps];
+                @memcpy(b, self.fm.readPage(prev_id));
+                page.setLeafNextPage(b, new_left_id);
+                try self.fm.writePage(prev_id, b);
+            }
+            if (next_id != 0) {
+                var buf: [65536]u8 = undefined;
+                const b = buf[0..ps];
+                @memcpy(b, self.fm.readPage(next_id));
+                page.setLeafPrevPage(b, right_id);
+                try self.fm.writePage(next_id, b);
+            }
+        } else {
+            // Simple COW: just update neighbors to point to new_left_id
+            if (prev_id != 0) {
+                var buf: [65536]u8 = undefined;
+                const b = buf[0..ps];
+                @memcpy(b, self.fm.readPage(prev_id));
+                page.setLeafNextPage(b, new_left_id);
+                try self.fm.writePage(prev_id, b);
+            }
+            if (next_id != 0) {
+                var buf: [65536]u8 = undefined;
+                const b = buf[0..ps];
+                @memcpy(b, self.fm.readPage(next_id));
+                page.setLeafPrevPage(b, new_left_id);
+                try self.fm.writePage(next_id, b);
+            }
+        }
+        _ = old_leaf_id;
     }
 
     fn findLeaf(self: BPlusTree, key: []const u8) []const u8 {
@@ -222,6 +592,22 @@ pub const Iterator = struct {
         return result;
     }
 };
+
+/// Lower-bound search in a branch page — returns the index where a key should be inserted.
+fn branchSearchPoint(buf: []const u8, key: []const u8, cmp: page.KeyCompareFn) u16 {
+    const count = page.branchEntryCount(buf);
+    var lo: u16 = 0;
+    var hi: u16 = count;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const entry_key = page.branchGetKey(buf, mid);
+        switch (cmp(entry_key, key)) {
+            .lt => lo = mid + 1,
+            .gt, .eq => hi = mid,
+        }
+    }
+    return lo;
+}
 
 // ============================================================================
 // Tests
@@ -709,4 +1095,466 @@ test "subtask 17: reverse from exhausted seek" {
 
     // prev() from exhausted position → "hhh" (last entry)
     try testing.expectEqualStrings("hhh", it.prev().?.key);
+}
+
+// --- Phase H: Insert Basics ---
+
+test "insert 1: insert into empty tree" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("hello", "world");
+
+    try testing.expect(tree.root != 0);
+    try testing.expectEqualStrings("world", tree.lookup("hello").?);
+}
+
+test "insert 2: insert 5 entries no split" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("ccc", "v3");
+    try tree.insert("aaa", "v1");
+    try tree.insert("eee", "v5");
+    try tree.insert("bbb", "v2");
+    try tree.insert("ddd", "v4");
+
+    // All lookable
+    try testing.expectEqualStrings("v1", tree.lookup("aaa").?);
+    try testing.expectEqualStrings("v2", tree.lookup("bbb").?);
+    try testing.expectEqualStrings("v3", tree.lookup("ccc").?);
+    try testing.expectEqualStrings("v4", tree.lookup("ddd").?);
+    try testing.expectEqualStrings("v5", tree.lookup("eee").?);
+
+    // Forward iteration correct order
+    const expected = [_][]const u8{ "aaa", "bbb", "ccc", "ddd", "eee" };
+    var it = tree.seekFirst();
+    for (expected) |key| {
+        try testing.expectEqualStrings(key, it.next().?.key);
+    }
+    try testing.expect(it.next() == null);
+}
+
+test "insert 3: insert duplicate key (update)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("aaa", "old");
+    try tree.insert("bbb", "v2");
+    try tree.insert("aaa", "new");
+
+    try testing.expectEqualStrings("new", tree.lookup("aaa").?);
+    try testing.expectEqualStrings("v2", tree.lookup("bbb").?);
+
+    // Entry count should be 2, not 3
+    const leaf = fm.readPage(tree.root);
+    try testing.expectEqual(@as(u16, 2), page.leafEntryCount(leaf));
+}
+
+test "insert 4: insert then lookup missing key" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("aaa", "v1");
+    try tree.insert("ccc", "v3");
+
+    try testing.expect(tree.lookup("bbb") == null);
+    try testing.expect(tree.lookup("ddd") == null);
+    try testing.expect(tree.lookup("000") == null);
+}
+
+// --- Phase I: Insert with Leaf Split ---
+
+test "insert 5: leaf split triggers (small page)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 256 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+
+    // Insert entries until a split must occur. With 256-byte pages:
+    // leaf header=24, each entry ≈ 2+3+2+2 = 9 data + 2 offset = 11 bytes
+    // Available: 232 / 11 ≈ 21 entries max. Use enough to guarantee split.
+    const keys = [_][]const u8{ "aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii", "jj", "kk", "ll", "mm", "nn", "oo", "pp", "qq", "rr", "ss", "tt", "uu", "vv", "ww" };
+    for (keys) |k| {
+        try tree.insert(k, k);
+    }
+
+    // All entries lookable
+    for (keys) |k| {
+        const val = tree.lookup(k);
+        try testing.expect(val != null);
+        try testing.expectEqualStrings(k, val.?);
+    }
+}
+
+test "insert 6: after split, seekFirst/seekLast traversal works" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 256 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    const keys = [_][]const u8{ "aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii", "jj", "kk", "ll", "mm", "nn", "oo", "pp", "qq", "rr", "ss", "tt" };
+    for (keys) |k| {
+        try tree.insert(k, k);
+    }
+
+    // Forward traversal
+    var fwd = tree.seekFirst();
+    for (keys) |k| {
+        const entry = fwd.next() orelse {
+            return error.TestUnexpectedResult;
+        };
+        try testing.expectEqualStrings(k, entry.key);
+    }
+    try testing.expect(fwd.next() == null);
+
+    // Backward traversal
+    var bwd = tree.seekLast();
+    var i: usize = keys.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = bwd.prev() orelse {
+            return error.TestUnexpectedResult;
+        };
+        try testing.expectEqualStrings(keys[i], entry.key);
+    }
+    try testing.expect(bwd.prev() == null);
+}
+
+test "insert 7: multiple successive splits" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 128 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+
+    // With 128-byte pages, splits happen very quickly
+    // Header=24, each "xx"+"xx" entry = 2+2+2+2=8 data + 2 offset = 10
+    // (128-24)/10 ≈ 10 max entries → should produce 3+ leaves
+    const keys = [_][]const u8{ "aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii", "jj", "kk", "ll", "mm", "nn", "oo", "pp", "qq", "rr", "ss", "tt" };
+    for (keys) |k| {
+        try tree.insert(k, k);
+    }
+
+    // All entries in order via forward iteration
+    var it = tree.seekFirst();
+    for (keys) |k| {
+        const entry = it.next() orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(k, entry.key);
+    }
+    try testing.expect(it.next() == null);
+}
+
+// --- Phase J: Insert with Branch Split ---
+
+test "insert 8: branch split" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 128 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+
+    // Insert enough entries to trigger branch splits (128-byte pages)
+    var key_buf: [2]u8 = undefined;
+    var i: u8 = 0;
+    while (i < 60) : (i += 1) {
+        key_buf[0] = 'a' + (i / 26);
+        key_buf[1] = 'a' + (i % 26);
+        try tree.insert(&key_buf, &key_buf);
+    }
+
+    // All entries lookable
+    i = 0;
+    while (i < 60) : (i += 1) {
+        key_buf[0] = 'a' + (i / 26);
+        key_buf[1] = 'a' + (i % 26);
+        const val = tree.lookup(&key_buf);
+        try testing.expect(val != null);
+        try testing.expectEqualStrings(&key_buf, val.?);
+    }
+}
+
+test "insert 9: continued inserts after branch split" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 128 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+
+    // Insert 100 entries — should create multiple branch levels
+    var key_buf: [3]u8 = undefined;
+    var i: u16 = 0;
+    while (i < 100) : (i += 1) {
+        key_buf[0] = 'a' + @as(u8, @intCast(i / 26 / 26));
+        key_buf[1] = 'a' + @as(u8, @intCast((i / 26) % 26));
+        key_buf[2] = 'a' + @as(u8, @intCast(i % 26));
+        try tree.insert(&key_buf, &key_buf);
+    }
+
+    // All entries lookable
+    i = 0;
+    while (i < 100) : (i += 1) {
+        key_buf[0] = 'a' + @as(u8, @intCast(i / 26 / 26));
+        key_buf[1] = 'a' + @as(u8, @intCast((i / 26) % 26));
+        key_buf[2] = 'a' + @as(u8, @intCast(i % 26));
+        const val = tree.lookup(&key_buf);
+        try testing.expect(val != null);
+        try testing.expectEqualStrings(&key_buf, val.?);
+    }
+
+    // Forward iteration in order
+    var it = tree.seekFirst();
+    var prev_key: [3]u8 = [_]u8{ 0, 0, 0 };
+    var count: u16 = 0;
+    while (it.next()) |entry| {
+        if (count > 0) {
+            try testing.expectEqual(math.Order.lt, mem.order(u8, &prev_key, entry.key));
+        }
+        @memcpy(&prev_key, entry.key);
+        count += 1;
+    }
+    try testing.expectEqual(@as(u16, 100), count);
+}
+
+// --- Phase K: Delete Basics ---
+
+test "delete 10: delete from single leaf" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("aaa", "v1");
+    try tree.insert("bbb", "v2");
+    try tree.insert("ccc", "v3");
+
+    const old_root = tree.root;
+    try tree.delete("bbb");
+
+    // Root changed (COW)
+    try testing.expect(tree.root != old_root);
+    // Key gone
+    try testing.expect(tree.lookup("bbb") == null);
+    // Others remain
+    try testing.expectEqualStrings("v1", tree.lookup("aaa").?);
+    try testing.expectEqualStrings("v3", tree.lookup("ccc").?);
+}
+
+test "delete 11: delete non-existent key" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("aaa", "v1");
+    try tree.insert("bbb", "v2");
+
+    const old_root = tree.root;
+    try tree.delete("zzz");
+
+    // Root unchanged — no COW needed
+    try testing.expectEqual(old_root, tree.root);
+    // All entries intact
+    try testing.expectEqualStrings("v1", tree.lookup("aaa").?);
+    try testing.expectEqualStrings("v2", tree.lookup("bbb").?);
+}
+
+test "delete 12: delete all entries one by one" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("aaa", "v1");
+    try tree.insert("bbb", "v2");
+    try tree.insert("ccc", "v3");
+
+    try tree.delete("bbb");
+    try testing.expect(tree.lookup("bbb") == null);
+    try testing.expectEqualStrings("v1", tree.lookup("aaa").?);
+    try testing.expectEqualStrings("v3", tree.lookup("ccc").?);
+
+    try tree.delete("aaa");
+    try testing.expect(tree.lookup("aaa") == null);
+    try testing.expectEqualStrings("v3", tree.lookup("ccc").?);
+
+    try tree.delete("ccc");
+    try testing.expect(tree.lookup("ccc") == null);
+}
+
+// --- Phase L: Delete from Multi-Level Tree ---
+
+test "delete 13: delete from 2-level tree" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 256 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    const keys = [_][]const u8{ "aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii", "jj", "kk", "ll", "mm", "nn", "oo", "pp", "qq", "rr", "ss", "tt" };
+    for (keys) |k| {
+        try tree.insert(k, k);
+    }
+
+    // Delete a few
+    try tree.delete("ee");
+    try tree.delete("mm");
+    try tree.delete("aa");
+
+    try testing.expect(tree.lookup("ee") == null);
+    try testing.expect(tree.lookup("mm") == null);
+    try testing.expect(tree.lookup("aa") == null);
+
+    // Remaining entries still in order via iteration
+    var it = tree.seekFirst();
+    var count: u16 = 0;
+    var prev_key: [2]u8 = [_]u8{ 0, 0 };
+    while (it.next()) |entry| {
+        if (count > 0) {
+            try testing.expectEqual(math.Order.lt, mem.order(u8, &prev_key, entry.key));
+        }
+        @memcpy(&prev_key, entry.key[0..2]);
+        count += 1;
+    }
+    try testing.expectEqual(@as(u16, 17), count); // 20 - 3
+}
+
+test "delete 14: delete from 3-level tree, multiple keys" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 128 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+
+    // Insert enough for a 3-level tree
+    var key_buf: [2]u8 = undefined;
+    var i: u8 = 0;
+    while (i < 60) : (i += 1) {
+        key_buf[0] = 'a' + (i / 26);
+        key_buf[1] = 'a' + (i % 26);
+        try tree.insert(&key_buf, &key_buf);
+    }
+
+    // Delete every 3rd entry
+    i = 0;
+    var deleted: u16 = 0;
+    while (i < 60) : (i += 3) {
+        key_buf[0] = 'a' + (i / 26);
+        key_buf[1] = 'a' + (i % 26);
+        try tree.delete(&key_buf);
+        deleted += 1;
+    }
+
+    // Remaining entries correct and ordered
+    var it = tree.seekFirst();
+    var count: u16 = 0;
+    var prev: [2]u8 = [_]u8{ 0, 0 };
+    while (it.next()) |entry| {
+        if (count > 0) {
+            try testing.expectEqual(math.Order.lt, mem.order(u8, &prev, entry.key));
+        }
+        @memcpy(&prev, entry.key[0..2]);
+        count += 1;
+    }
+    try testing.expectEqual(@as(u16, 60 - deleted), count);
+}
+
+// --- Phase M: Mixed Operations ---
+
+test "insert/delete 15: insert, delete, re-insert same key" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+    try tree.insert("key", "first");
+    try testing.expectEqualStrings("first", tree.lookup("key").?);
+
+    try tree.delete("key");
+    try testing.expect(tree.lookup("key") == null);
+
+    try tree.insert("key", "second");
+    try testing.expectEqualStrings("second", tree.lookup("key").?);
+}
+
+test "insert/delete 16: stress insert 50+ then delete half" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fm = try file.FileManager.open(tmp.dir, "test.zat", .{ .page_size = 256 });
+    defer fm.close();
+
+    var tree = BPlusTree.init(0, &fm, testKeyCmp);
+
+    // Insert 60 entries
+    var key_buf: [3]u8 = undefined;
+    var i: u16 = 0;
+    while (i < 60) : (i += 1) {
+        key_buf[0] = 'a' + @as(u8, @intCast(i / 26 / 26));
+        key_buf[1] = 'a' + @as(u8, @intCast((i / 26) % 26));
+        key_buf[2] = 'a' + @as(u8, @intCast(i % 26));
+        try tree.insert(&key_buf, &key_buf);
+    }
+
+    // Delete even-indexed entries (30 entries)
+    i = 0;
+    while (i < 60) : (i += 2) {
+        key_buf[0] = 'a' + @as(u8, @intCast(i / 26 / 26));
+        key_buf[1] = 'a' + @as(u8, @intCast((i / 26) % 26));
+        key_buf[2] = 'a' + @as(u8, @intCast(i % 26));
+        try tree.delete(&key_buf);
+    }
+
+    // Remaining (odd-indexed) entries all present and ordered
+    var it = tree.seekFirst();
+    var count: u16 = 0;
+    var prev: [3]u8 = [_]u8{ 0, 0, 0 };
+    while (it.next()) |entry| {
+        if (count > 0) {
+            try testing.expectEqual(math.Order.lt, mem.order(u8, &prev, entry.key));
+        }
+        @memcpy(&prev, entry.key[0..3]);
+        count += 1;
+    }
+    try testing.expectEqual(@as(u16, 30), count);
+
+    // Verify deleted entries are gone
+    i = 0;
+    while (i < 60) : (i += 2) {
+        key_buf[0] = 'a' + @as(u8, @intCast(i / 26 / 26));
+        key_buf[1] = 'a' + @as(u8, @intCast((i / 26) % 26));
+        key_buf[2] = 'a' + @as(u8, @intCast(i % 26));
+        try testing.expect(tree.lookup(&key_buf) == null);
+    }
+
+    // Verify remaining entries are present
+    i = 1;
+    while (i < 60) : (i += 2) {
+        key_buf[0] = 'a' + @as(u8, @intCast(i / 26 / 26));
+        key_buf[1] = 'a' + @as(u8, @intCast((i / 26) % 26));
+        key_buf[2] = 'a' + @as(u8, @intCast(i % 26));
+        try testing.expect(tree.lookup(&key_buf) != null);
+    }
 }
