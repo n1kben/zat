@@ -8,7 +8,7 @@ pub const file = @import("file.zig");
 pub const btree = @import("btree.zig");
 pub const freelist = @import("freelist.zig");
 pub const index = @import("index.zig");
-// const tx = @import("tx.zig");
+pub const tx = @import("tx.zig");
 pub const schema = @import("schema.zig");
 
 const std = @import("std");
@@ -22,4 +22,5 @@ test {
     _ = freelist;
     _ = schema;
     _ = index;
+    _ = tx;
 }
