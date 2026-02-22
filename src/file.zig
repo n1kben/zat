@@ -22,6 +22,9 @@ pub const FileManager = struct {
     page_size: u32,
     file_size: u64,
     next_page: u64,
+    reuse_pages: [256]u64 = .{0} ** 256,
+    reuse_count: u32 = 0,
+    reuse_pos: u32 = 0,
 
     /// Open or create a .zat database file.
     pub fn open(dir: std.fs.Dir, name: []const u8, opts: OpenOpts) !FileManager {
@@ -117,15 +120,34 @@ pub const FileManager = struct {
         try self.file.pwriteAll(data, offset);
     }
 
-    /// Allocate a new page. Extends the file. Returns the page ID.
+    /// Allocate a new page. Returns a reusable page if available, otherwise extends the file.
     /// Call remap() before reading the new page via mmap.
     pub fn allocPage(self: *FileManager) !u64 {
+        if (self.reuse_pos < self.reuse_count) {
+            const page_id = self.reuse_pages[self.reuse_pos];
+            self.reuse_pos += 1;
+            return page_id;
+        }
         const page_id = self.next_page;
         self.next_page += 1;
         const new_size: u64 = self.next_page * @as(u64, self.page_size);
         try self.file.setEndPos(new_size);
         self.file_size = new_size;
         return page_id;
+    }
+
+    /// Load reusable page IDs for allocation. Replaces any existing reuse list.
+    pub fn loadReusablePages(self: *FileManager, pages: []const u64) void {
+        const count: u32 = @intCast(@min(pages.len, self.reuse_pages.len));
+        @memcpy(self.reuse_pages[0..count], pages[0..count]);
+        self.reuse_count = count;
+        self.reuse_pos = 0;
+    }
+
+    /// Clear the reusable pages list.
+    pub fn clearReusablePages(self: *FileManager) void {
+        self.reuse_count = 0;
+        self.reuse_pos = 0;
     }
 
     /// Re-mmap the file (e.g., after allocating new pages).
@@ -601,4 +623,44 @@ test "subtask 20: two full transactions → reopen recovers latest" {
         try testing.expectEqualStrings("tx2_key", page.leafGetKey(read_data, 0));
         try testing.expectEqualStrings("tx2_val", page.leafGetValue(read_data, 0));
     }
+}
+
+// --- Phase H: Reusable Pages ---
+
+test "allocPage with reusable pages returns reuse first, then extends" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var fm = try FileManager.open(tmp.dir, "test.zat", .{});
+    defer fm.close();
+
+    // Allocate a few pages to grow the file
+    _ = try fm.allocPage(); // page 2
+    _ = try fm.allocPage(); // page 3
+    _ = try fm.allocPage(); // page 4
+    const size_before = fm.file_size;
+    const next_before = fm.next_page; // should be 5
+
+    // Load reusable pages
+    fm.loadReusablePages(&[_]u64{ 3, 4 });
+
+    // Next allocs should return reuse pages without growing file
+    const r1 = try fm.allocPage();
+    try testing.expectEqual(@as(u64, 3), r1);
+    try testing.expectEqual(size_before, fm.file_size);
+
+    const r2 = try fm.allocPage();
+    try testing.expectEqual(@as(u64, 4), r2);
+    try testing.expectEqual(size_before, fm.file_size);
+
+    // Reuse exhausted — next alloc should extend
+    const r3 = try fm.allocPage();
+    try testing.expectEqual(next_before, r3);
+    try testing.expect(fm.file_size > size_before);
+
+    // clearReusablePages resets the reuse list
+    fm.loadReusablePages(&[_]u64{ 10, 20 });
+    fm.clearReusablePages();
+    const r4 = try fm.allocPage();
+    try testing.expectEqual(next_before + 1, r4);
 }

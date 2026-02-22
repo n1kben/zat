@@ -12,6 +12,7 @@ const math = std.math;
 const testing = std.testing;
 const page = @import("page.zig");
 const file = @import("file.zig");
+const freelist = @import("freelist.zig");
 
 pub const Entry = struct {
     key: []const u8,
@@ -22,6 +23,7 @@ pub const BPlusTree = struct {
     root: u64,
     fm: *file.FileManager,
     cmp: page.KeyCompareFn,
+    freed: ?*freelist.FreePageTracker = null,
 
     pub fn init(root_page: u64, fm: *file.FileManager, cmp: page.KeyCompareFn) BPlusTree {
         return .{ .root = root_page, .fm = fm, .cmp = cmp };
@@ -200,6 +202,7 @@ pub const BPlusTree = struct {
             const new_leaf_id = try self.fm.allocPage();
             try self.fm.writePage(new_leaf_id, lb);
             try self.fixLeafSiblings(old_leaf_id, lb, new_leaf_id, null);
+            if (self.freed) |f| f.addPage(old_leaf_id);
             state = .{ .cow = new_leaf_id };
         } else |_| {
             // PageFull — split
@@ -237,6 +240,7 @@ pub const BPlusTree = struct {
 
             // Fix neighbors
             try self.fixLeafSiblings(old_leaf_id, old_leaf, new_left_id, new_right_id);
+            if (self.freed) |f| f.addPage(old_leaf_id);
 
             state = .{ .split = .{ .sep_key = sep_saved, .left_id = new_left_id, .right_id = new_right_id } };
         }
@@ -260,6 +264,7 @@ pub const BPlusTree = struct {
                     }
                     const new_branch_id = try self.fm.allocPage();
                     try self.fm.writePage(new_branch_id, bb);
+                    if (self.freed) |f| f.addPage(pe.page_id);
                     state = .{ .cow = new_branch_id };
                 },
                 .split => |s| {
@@ -287,6 +292,7 @@ pub const BPlusTree = struct {
                         }
                         const new_branch_id = try self.fm.allocPage();
                         try self.fm.writePage(new_branch_id, bb);
+                        if (self.freed) |f| f.addPage(pe.page_id);
                         state = .{ .cow = new_branch_id };
                     } else |_| {
                         // Branch is full — split it
@@ -326,6 +332,7 @@ pub const BPlusTree = struct {
                         const new_right_branch = try self.fm.allocPage();
                         try self.fm.writePage(new_left_branch, bb);
                         try self.fm.writePage(new_right_branch, rbb);
+                        if (self.freed) |f| f.addPage(pe.page_id);
                         state = .{ .split = .{ .sep_key = promoted_key, .left_id = new_left_branch, .right_id = new_right_branch } };
                     }
                 },
@@ -406,6 +413,7 @@ pub const BPlusTree = struct {
         const new_leaf_id = try self.fm.allocPage();
         try self.fm.writePage(new_leaf_id, lb);
         try self.fixLeafSiblings(old_leaf_id, old_leaf, new_leaf_id, null);
+        if (self.freed) |f| f.addPage(old_leaf_id);
 
         // Propagate COW upward
         var new_child_id = new_leaf_id;
@@ -425,6 +433,7 @@ pub const BPlusTree = struct {
             }
             const new_branch_id = try self.fm.allocPage();
             try self.fm.writePage(new_branch_id, bb);
+            if (self.freed) |f| f.addPage(pe.page_id);
             new_child_id = new_branch_id;
         }
 

@@ -6,6 +6,7 @@ pub const page = @import("page.zig");
 pub const meta = @import("meta.zig");
 pub const file = @import("file.zig");
 pub const btree = @import("btree.zig");
+pub const freelist = @import("freelist.zig");
 // const index = @import("index.zig");
 // const tx = @import("tx.zig");
 // const schema = @import("schema.zig");
@@ -18,4 +19,5 @@ test {
     _ = meta;
     _ = file;
     _ = btree;
+    _ = freelist;
 }
