@@ -223,6 +223,19 @@ pub const SchemaCache = struct {
         const attr = self.getAttr(attr_eid) orelse return false;
         return std.meta.activeTag(value) == attr.value_type;
     }
+
+    /// Check if an attribute should be indexed in AVE.
+    /// True when explicitly indexed or has a uniqueness constraint.
+    pub fn isIndexed(self: *const SchemaCache, attr_eid: u64) bool {
+        const attr = self.getAttr(attr_eid) orelse return false;
+        return attr.indexed or attr.unique != .none;
+    }
+
+    /// Check if an attribute's value type is ref (for VAE index).
+    pub fn isRef(self: *const SchemaCache, attr_eid: u64) bool {
+        const attr = self.getAttr(attr_eid) orelse return false;
+        return attr.value_type == .ref;
+    }
 };
 
 // ============================================================================

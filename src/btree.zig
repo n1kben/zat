@@ -24,6 +24,7 @@ pub const BPlusTree = struct {
     fm: *file.FileManager,
     cmp: page.KeyCompareFn,
     freed: ?*freelist.FreePageTracker = null,
+    index_id: page.IndexId = .eav,
 
     pub fn init(root_page: u64, fm: *file.FileManager, cmp: page.KeyCompareFn) BPlusTree {
         return .{ .root = root_page, .fm = fm, .cmp = cmp };
@@ -137,7 +138,7 @@ pub const BPlusTree = struct {
             const leaf_id = try self.fm.allocPage();
             var buf: [65536]u8 = undefined;
             const b = buf[0..ps];
-            page.initLeaf(b, .eav);
+            page.initLeaf(b, self.index_id);
             try page.leafInsertEntry(b, 0, key, value);
             try self.fm.writePage(leaf_id, b);
             try self.fm.remap();
@@ -348,7 +349,7 @@ pub const BPlusTree = struct {
                 // Create new root branch
                 var root_buf: [65536]u8 = undefined;
                 const rootb = root_buf[0..ps];
-                page.initBranch(rootb, .eav, s.right_id);
+                page.initBranch(rootb, self.index_id, s.right_id);
                 try page.branchInsertEntry(rootb, 0, s.sep_key, s.left_id);
                 const new_root_id = try self.fm.allocPage();
                 try self.fm.writePage(new_root_id, rootb);
