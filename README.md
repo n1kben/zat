@@ -1,6 +1,6 @@
 # ZatDB
 
-Datomic-style embedded database in Zig. Single `.zat` file.
+Embedded database in Zig. Single `.zat` file.
 
 ## Testing
 
